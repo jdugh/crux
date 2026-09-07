@@ -24,7 +24,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from . import (baseline, config, decisions, intent, paths, state)
+from . import (baseline, config, decisions, findings, intent, paths, state)
 
 MAX_PROMPT_CHARS = 20000
 
@@ -202,19 +202,32 @@ def session_start() -> int:
     if not gate.armed or repo is None or cfg is None:
         return 0
 
-    if session_id:
-        try:
-            manifest = baseline.capture(session_id, repo, cfg)
-            st = state.load(session_id)
-            st.repo = str(repo)
-            st.head = manifest.head
-            st.branch = manifest.branch
-            st.baseline_captured = True
-            if not st.armed_at:
-                st.armed_at = state.now_iso()
-            state.save(st)
-        except Exception as exc:
-            _log(f"capture de baseline impossible: {exc}")
+    # The banner is a claim, and it must be earned. Without a session id there
+    # is nothing to attach a baseline to; without a baseline the session diff has
+    # no reference point and a later review would compare against nothing. Saying
+    # "Crux est armé" in either case describes a protection that does not exist,
+    # which is worse than saying nothing: it is the one failure mode nobody
+    # checks for. Stay fail-open - never block, never write - but stay quiet, and
+    # leave a diagnosable trace.
+    if not session_id:
+        _log("SessionStart sans session_id exploitable (charge utile illisible "
+             "ou incomplète) : aucune baseline capturée, bannière supprimée")
+        return 0
+
+    try:
+        manifest = baseline.capture(session_id, repo, cfg)
+        st = state.load(session_id)
+        st.repo = str(repo)
+        st.head = manifest.head
+        st.branch = manifest.branch
+        st.baseline_captured = True
+        if not st.armed_at:
+            st.armed_at = state.now_iso()
+        state.save(st)
+    except Exception as exc:
+        _log(f"capture de baseline impossible pour {session_id}: {exc!r} — "
+             f"bannière supprimée, la session n'est pas réellement protégée")
+        return 0
 
     _emit({"hookSpecificOutput": {
         "hookEventName": "SessionStart",
@@ -358,6 +371,23 @@ STOP_INSTRUCTIONS = (
     "3. Reprends la main normalement ensuite."
 )
 
+FINDING_INSTRUCTIONS = (
+    "Crux — {count} finding(s) technique(s) bloquant(s) sans arbitrage : "
+    "{ids}.\n\n"
+    "Ils ont déjà été rendus par un reviewer : aucune nouvelle review n'est "
+    "nécessaire, et aucune n'est demandée ici.\n"
+    "Tu restes l'autorité technique dans le périmètre approuvé — tu peux "
+    "parfaitement les rejeter. Ce qui est refusé, c'est le silence.\n"
+    "Pour chacun, vérifie dans le code, puis :\n"
+    "  · réel → corrige, puis `crux resolve --id <ID> --status accepted`\n"
+    "  · faux positif → `crux resolve --id <ID> --status rejected --reason "
+    "\"<raison technique>\"`\n"
+    "  · réel mais hors de la demande → `crux resolve --id <ID> --status "
+    "deferred --reason \"...\"`\n"
+    "Détail d'un finding : `crux report --run <dernier>` ou le rapport déjà "
+    "affiché."
+)
+
 DECISION_INSTRUCTIONS = (
     "Crux — {count} décision(s) humaine(s) en attente : {ids}.\n\n"
     "Tu ne peux pas terminer ce tour et tu ne peux pas les trancher toi-même.\n"
@@ -413,6 +443,29 @@ def stop() -> int:
             # Already asked: AskUserQuestion is synchronous, so the session is
             # waiting on the human. Nothing more for the gate to do.
 
+    # ---- D4: a recorded blocking finding must be arbitrated ---------------
+    # Placed after the human decision gate and before the arming test, for the
+    # same reason the decision gate is: `crux off` disarms *new* reviews, it does
+    # not silently retire an obligation that already exists. Deliberately ahead
+    # of the round and budget checks too - exhausting the review budget says
+    # nothing about a finding already on disk.
+    #
+    # No Codex, no network, no model: two local file reads. It therefore cannot
+    # fail the way I1 protects against, and a read failure falls open anyway.
+    # `CRUX_DISABLE=1` remains the absolute escape hatch, as it is for a wrongly
+    # opened decision.
+    if session_id:
+        try:
+            floor = str(cfg.get("gate.block_on", "high")) if cfg else "high"
+            unarbitrated = findings.unarbitrated(session_id, floor)
+        except Exception as exc:      # noqa: BLE001 - I1 over the ledger read
+            _log(f"lecture des findings impossible, garde ignoré: {exc!r}")
+            unarbitrated = []
+        if unarbitrated:
+            return _block(FINDING_INSTRUCTIONS.format(
+                count=len(unarbitrated),
+                ids=", ".join(f.id for f in unarbitrated[:12])))
+
     if not gate.armed or repo is None or cfg is None or not session_id:
         return 0
     if not gate.code:
@@ -438,8 +491,17 @@ def stop() -> int:
 
     if diff.is_empty:
         return 0
-    if diff.fingerprint == st.last_diff_fingerprint:
-        # Nothing moved since the last review: another round would find nothing.
+    if diff.fingerprint == st.last_successful_diff_fingerprint:
+        # Nothing moved since the last usable review: another round finds nothing.
+        return 0
+    if (diff.fingerprint == st.last_attempt_fingerprint
+            and st.last_attempt_status in state.ATTEMPT_NO_AUTO_RETRY):
+        # Already tried on this exact diff and the reviewers could not answer -
+        # out of quota, offline, timed out. Asking again would spin
+        # Stop -> review -> failure -> Stop. Fail open: the turn may end. A new
+        # edit moves the fingerprint, and `crux review` by hand always retries.
+        _log(f"tentative précédente {st.last_attempt_status} sur la même "
+             f"empreinte — pas de relance automatique")
         return 0
 
     return _block(STOP_INSTRUCTIONS.format(session=session_id))

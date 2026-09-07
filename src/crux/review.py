@@ -7,6 +7,7 @@ validate -> dedupe -> promote to human decisions -> render.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from dataclasses import dataclass, field
@@ -41,6 +42,9 @@ class RunResult:
     promoted: Dict[str, str] = field(default_factory=dict)
     opened_decisions: List[str] = field(default_factory=list)
     blocking_ids: List[str] = field(default_factory=list)
+    failed_reviewers: List[str] = field(default_factory=list)
+    attempt_status: str = state.ATTEMPT_FAILED
+    usable: bool = False
     duration: float = 0.0
     codex_error: Optional[str] = None
 
@@ -60,6 +64,9 @@ class RunResult:
             "promoted": self.promoted,
             "opened_decisions": self.opened_decisions,
             "blocking": self.blocking_ids,
+            "failed_reviewers": self.failed_reviewers,
+            "attempt_status": self.attempt_status,
+            "usable": self.usable,
             "codex_error": self.codex_error,
         }
 
@@ -78,6 +85,43 @@ def project_has_tests(repo: Path) -> bool:
         if lowered.startswith("test") or "_test." in lowered or ".test." in lowered:
             return True
     return False
+
+
+def classify_attempt(reviewer_results: List[findings.ReviewerResult],
+                     scope_authority: Optional[str]) -> str:
+    """How much of this attempt is usable as an anchor for a later round.
+
+    The scope authority is the pivot: it is the only reviewer that fills the
+    `scope` block, so without it the round has no verdict on drift and must not
+    become the baseline a targeted round 2 reasons against. Partial answers are
+    still archived under the run directory for diagnosis.
+    """
+    answered = {r.reviewer for r in reviewer_results if r.ok}
+    if not answered:
+        return state.ATTEMPT_FAILED
+    if scope_authority is not None and scope_authority not in answered:
+        return state.ATTEMPT_UNUSABLE
+    if any(not r.ok for r in reviewer_results):
+        return state.ATTEMPT_DEGRADED
+    return state.ATTEMPT_SUCCESS
+
+
+def content_map(repo: Path, relpaths: Sequence[str]) -> Dict[str, Optional[str]]:
+    """sha256 of each path's current bytes, or None when it is not there.
+
+    Hashes the working tree, never the edits journal: a change made by `sed`, a
+    formatter or an external editor must be seen exactly like an Edit. This map
+    is what a later round diffs against to know what has actually moved.
+    """
+    out: Dict[str, Optional[str]] = {}
+    for relpath in relpaths:
+        candidate = repo / relpath
+        try:
+            out[relpath] = (hashlib.sha256(candidate.read_bytes()).hexdigest()
+                            if candidate.is_file() else None)
+        except OSError:
+            out[relpath] = None
+    return out
 
 
 def new_run_id(repo: Path) -> str:
@@ -226,14 +270,41 @@ def run(session_id: str, repo: Path, cfg,
                 duration=outcome.duration))
             continue
         parsed = findings.parse_reviewer_payload(
-            outcome.reviewer, outcome.payload, start_index=index)
+            outcome.reviewer, outcome.payload, start_index=index,
+            round_no=round_no)
         parsed.duration = outcome.duration
         index += len(parsed.findings)
         result.reviewer_results.append(parsed)
 
+    result.failed_reviewers = [r.reviewer for r in result.reviewer_results
+                              if not r.ok]
+    result.attempt_status = classify_attempt(result.reviewer_results,
+                                             result.scope_authority)
+    result.usable = result.attempt_status in state.ATTEMPT_USABLE
+
     merged, _notes = findings.dedupe(
         [r for r in result.reviewer_results if r.ok])
     result.all_findings = merged
+
+    if not result.usable:
+        # Not an anchor, so nothing is recorded as one: no round, no findings
+        # journal, no promotion. Opening a blocking human decision out of an
+        # unanchored partial run would turn a technical failure into an
+        # obligation, which is exactly what I1 forbids. The raw payloads and the
+        # run record stay under ~/.crux/runs/<run_id>/ for diagnosis.
+        st.record_attempt(diff.fingerprint, result.attempt_status)
+        st.last_run_id = run_id
+        st.budget_spent += time.time() - started
+        state.save(st)
+        result.duration = time.time() - started
+        paths.write_json(directory / "run.json", result.to_dict())
+        try:
+            (directory / "report.md").write_text(
+                report.render_markdown(result, session_id, cfg), encoding="utf-8")
+        except OSError:
+            pass
+        rotate_runs(int(cfg.get("logs.keep_runs", 30)))
+        return result
 
     # --- promotion: anything functional leaves Claude's authority ---------
     mode = str(cfg.get("human.scope_changes.mode", "ask"))
@@ -246,6 +317,7 @@ def run(session_id: str, repo: Path, cfg,
             blast_radius_paths=[finding.file] if finding.file else [],
             origin=f"codex:{finding.reviewer}",
             from_findings=[finding.id],
+            finding_key=finding.key,
             round_no=round_no,
             mode=mode,
         )
@@ -278,12 +350,19 @@ def run(session_id: str, repo: Path, cfg,
             )
             result.opened_decisions.append(decision.id)
 
-    findings.save_round(session_id, round_no, merged, result.promoted)
+    findings.save_round(
+        session_id, round_no, merged, result.promoted,
+        selected=result.selected,
+        scope_authority=result.scope_authority,
+        failed_reviewers=result.failed_reviewers,
+        degraded=result.attempt_status == state.ATTEMPT_DEGRADED,
+        diff={"fingerprint": diff.fingerprint,
+              "files": content_map(repo, diff.files)})
     blocking = findings.blocking(merged, str(cfg.get("gate.block_on", "high")))
     result.blocking_ids = [f.id for f in blocking]
 
-    st.round = round_no
-    st.last_diff_fingerprint = diff.fingerprint
+    st.record_successful_round(round_no, diff.fingerprint)
+    st.record_attempt(diff.fingerprint, result.attempt_status)
     st.last_run_id = run_id
     st.budget_spent += time.time() - started
     state.save(st)

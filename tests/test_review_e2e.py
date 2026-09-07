@@ -280,7 +280,9 @@ class RealCodexIntegration(CruxTestCase):
     def test_output_schema_capability_probe(self):
         cfg = config.load(self.repo)
         result = capabilities.probe_output_schema(cfg)
-        self.assertIn("supported", result)
+        self.assertIn(result["status"], (capabilities.SUPPORTED,
+                                         capabilities.UNSUPPORTED,
+                                         capabilities.INDETERMINATE))
 
 
 if __name__ == "__main__":

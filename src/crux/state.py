@@ -19,6 +19,24 @@ from .config import Config
 GATE_MODES = ("off", "code", "plan", "both")
 _TRUTHY = {"1", "true", "yes", "on"}
 
+# Outcome of one review attempt. A round and an attempt are different things:
+# a round is an anchor a later round reasons against, an attempt is something
+# that was tried. Conflating them let a quota outage burn half the round budget.
+ATTEMPT_SUCCESS = "success"      # every selected reviewer answered
+ATTEMPT_DEGRADED = "degraded"    # scope authority answered, a secondary did not
+ATTEMPT_UNUSABLE = "unusable"    # the scope authority did not answer
+ATTEMPT_FAILED = "failed"        # no reviewer answered at all
+
+# Attempts that produced a usable round: only these advance `round`.
+ATTEMPT_USABLE = (ATTEMPT_SUCCESS, ATTEMPT_DEGRADED)
+
+# After one of these, the Stop hook must NOT ask for the same diff to be
+# reviewed again. With Codex out of quota, re-asking would spin
+# Stop -> review -> quota -> Stop, which is precisely the wedged session I1
+# exists to prevent. A new edit changes the fingerprint and lifts the hold;
+# `crux review` by hand always retries, because the CLI never consults this.
+ATTEMPT_NO_AUTO_RETRY = (ATTEMPT_UNUSABLE, ATTEMPT_FAILED)
+
 
 @dataclass
 class GateDecision:
@@ -65,7 +83,13 @@ class SessionState:
     branch: Optional[str] = None
     round: int = 0
     plan_round: int = 0
+    # Kept under its v0.1 name and mirrored on write so a downgrade still reads
+    # it; `last_successful_diff_fingerprint` is the one the code reasons with.
     last_diff_fingerprint: Optional[str] = None
+    last_successful_diff_fingerprint: Optional[str] = None
+    last_attempt_fingerprint: Optional[str] = None
+    last_attempt_status: Optional[str] = None
+    last_attempt_at: Optional[str] = None
     budget_spent: float = 0.0
     baseline_captured: bool = False
     last_run_id: Optional[str] = None
@@ -84,6 +108,11 @@ class SessionState:
             "round": self.round,
             "plan_round": self.plan_round,
             "last_diff_fingerprint": self.last_diff_fingerprint,
+            "last_successful_diff_fingerprint":
+                self.last_successful_diff_fingerprint,
+            "last_attempt_fingerprint": self.last_attempt_fingerprint,
+            "last_attempt_status": self.last_attempt_status,
+            "last_attempt_at": self.last_attempt_at,
             "budget_spent": self.budget_spent,
             "baseline_captured": self.baseline_captured,
             "last_run_id": self.last_run_id,
@@ -93,7 +122,24 @@ class SessionState:
     @classmethod
     def from_dict(cls, raw: Dict[str, Any]) -> "SessionState":
         known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
-        return cls(**{k: v for k, v in raw.items() if k in known})
+        state = cls(**{k: v for k, v in raw.items() if k in known})
+        if not state.last_successful_diff_fingerprint:
+            # A v0.1 state file: its single fingerprint was only ever written
+            # after a round that produced findings, so it *is* the successful one.
+            state.last_successful_diff_fingerprint = state.last_diff_fingerprint
+        return state
+
+    def record_attempt(self, fingerprint: str, status: str) -> None:
+        """Note that a review was tried. Says nothing about whether it worked."""
+        self.last_attempt_fingerprint = fingerprint
+        self.last_attempt_status = status
+        self.last_attempt_at = now_iso()
+
+    def record_successful_round(self, round_no: int, fingerprint: str) -> None:
+        """Advance the round. Only a usable attempt may call this."""
+        self.round = round_no
+        self.last_successful_diff_fingerprint = fingerprint
+        self.last_diff_fingerprint = fingerprint
 
 
 def state_path(session_id: str) -> Path:

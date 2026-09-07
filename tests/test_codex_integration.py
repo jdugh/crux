@@ -51,8 +51,12 @@ class CodexCapability(CruxTestCase):
         self.commit("init")
         cfg = config.load(self.repo)
         result = capabilities.probe_output_schema(cfg, repo=self.repo)
-        self.assertTrue(result.get("supported"),
-                        f"sonde échouée : {result.get('reason')}")
+        # A transient failure is not a verdict: skip rather than claim the
+        # capability is absent, which is the whole point of the tri-state.
+        if result.get("status") == capabilities.INDETERMINATE:
+            self.skipTest(f"sonde indéterminée : {result.get('reason')}")
+        self.assertEqual(result.get("status"), capabilities.SUPPORTED,
+                         f"sonde échouée : {result.get('reason')}")
 
 
 @unittest.skipUnless(CODEX, REASON)

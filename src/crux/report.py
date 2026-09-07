@@ -60,6 +60,33 @@ def render_markdown(result, session_id: str, cfg) -> str:
             out.append(f"- **{reviewer.reviewer}** : {reviewer.error} "
                        f"({reviewer.error_kind})")
 
+    if not getattr(result, "usable", True):
+        # A technical failure, never a verdict. Saying so plainly matters more
+        # than the rest of the report: an unusable attempt that reads like a
+        # clean review is worse than no review at all.
+        reason = ("aucun reviewer n'a répondu"
+                  if result.attempt_status == "failed"
+                  else f"l'autorité de périmètre ({result.scope_authority}) "
+                       f"n'a pas répondu")
+        out.append(
+            f"\n## Ce round n'a pas eu lieu\n"
+            f"Cause : {reason}. C'est une panne technique, pas un verdict.\n\n"
+            f"- le compteur de rounds n'a **pas** avancé ;\n"
+            f"- aucun finding n'est enregistré, aucune décision n'est ouverte ;\n"
+            f"- les réponses partielles restent dans `~/.crux/runs/"
+            f"{result.run_id}/` pour diagnostic ;\n"
+            f"- le tour peut se terminer normalement (fail-open) ;\n"
+            f"- relance possible à la main avec `crux review`, ou "
+            f"automatiquement dès que le diff bouge.")
+        return "\n".join(out)
+
+    if result.attempt_status == "degraded" and result.failed_reviewers:
+        out.append(
+            "\n## Round dégradé\n"
+            f"L'autorité de périmètre a répondu, mais "
+            f"{', '.join(result.failed_reviewers)} n'a pas abouti. Le round est "
+            f"enregistré ; l'angle manquant n'a pas été couvert.")
+
     for reviewer in result.reviewer_results:
         if reviewer.ok and reviewer.summary:
             out.append(f"\n**{reviewer.reviewer}** ({reviewer.verdict}) : "

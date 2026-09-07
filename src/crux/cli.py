@@ -138,6 +138,9 @@ def cmd_resolve(args) -> int:
     except findings.PromotedFinding as exc:
         _err(str(exc))
         return EXIT_PENDING_HUMAN
+    except findings.AmbiguousFinding as exc:
+        _err(str(exc))
+        return EXIT_USAGE
     except KeyError:
         _err(f"finding inconnu : {args.id}")
         return EXIT_USAGE
@@ -441,7 +444,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     resolve_p = sub.add_parser("resolve", help="arbitrage technique d'un finding")
     resolve_p.add_argument("--session")
-    resolve_p.add_argument("--id", required=True)
+    resolve_p.add_argument(
+        "--id", required=True,
+        help="identifiant du finding, par ex. R1F3 (la forme courte F3 est "
+             "acceptée tant qu'elle ne désigne qu'un seul finding)")
     resolve_p.add_argument("--status", required=True,
                            choices=["accepted", "rejected", "deferred"])
     resolve_p.add_argument("--reason", default="")

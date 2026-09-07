@@ -311,17 +311,27 @@ def run(probe: bool = False) -> int:
     elif probe:
         probe_repo = gitctx.repo_root(cwd) if gitctx.is_repo(cwd) else None
         result = capabilities.probe_output_schema(cfg_for_caps, repo=probe_repo)
-        supported = result.get("supported")
-        report.row(OK if supported else BAD, "--output-schema",
-                   "supporté" if supported else "non supporté",
+        status = result.get("status")
+        # Three states, and only one of them is a problem to fix. An
+        # indeterminate probe is a technical failure, not a missing capability:
+        # reporting it as BAD sent people hunting for a Codex bug that was a
+        # quota outage.
+        mark, label = {
+            capabilities.SUPPORTED: (OK, "supporté"),
+            capabilities.UNSUPPORTED: (BAD, "non supporté"),
+        }.get(status, (UNKNOWN, "indéterminé (panne technique)"))
+        report.row(mark, "--output-schema", label,
                    result.get("reason", "")[:60])
         capabilities.get(cfg_for_caps, refresh=True, repo=probe_repo)
         report.row(OK, "codex exec", "testé de bout en bout")
     else:
         caps = capabilities.get(cfg_for_caps)
-        cached = (caps.get("output_schema") or {}).get("supported")
-        label = {True: "supporté", False: "non supporté"}.get(cached, "non sondé")
-        report.row(OK if cached else UNKNOWN, "--output-schema", label,
+        cached = (caps.get("output_schema") or {}).get("status")
+        mark, label = {
+            capabilities.SUPPORTED: (OK, "supporté"),
+            capabilities.UNSUPPORTED: (BAD, "non supporté"),
+        }.get(cached, (UNKNOWN, "non sondé"))
+        report.row(mark, "--output-schema", label,
                    "→ crux doctor --probe pour tester réellement")
     report.row(DASH, "updatedInput/Ask", "non sondé",
                "modes advise/auto hors MVP (décision produit)")

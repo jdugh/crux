@@ -94,6 +94,13 @@ class Decision:
     clarifications: int = 0
     blast_radius: List[str] = field(default_factory=list)
     from_findings: List[str] = field(default_factory=list)
+    # Content identity of the finding this decision came from (`finding-key-v1`).
+    # Empty when the decision did not come from a finding - a `scope.changes[]`
+    # entry carries no title, and inventing an identity out of its free-text
+    # description could make two genuinely different drifts look like one. An
+    # empty key means "identity unknown", and unknown must never suppress a
+    # question: a duplicate question is cheap, a swallowed one is not.
+    finding_key: str = ""
     question: Optional[Dict[str, Any]] = None
     answer: Optional[Dict[str, Any]] = None
     updated_at: str = ""
@@ -106,7 +113,8 @@ class Decision:
             "alternatives": self.alternatives, "options": self.options,
             "clarifications": self.clarifications,
             "blast_radius": self.blast_radius,
-            "from_findings": self.from_findings, "question": self.question,
+            "from_findings": self.from_findings,
+            "finding_key": self.finding_key, "question": self.question,
             "answer": self.answer, "updated_at": self.updated_at,
         }
 
@@ -304,6 +312,7 @@ def propose(session_id: str, title: str, why: str,
             blast_radius_paths: Optional[List[str]] = None,
             kind: str = KIND_SCOPE, origin: str = "claude",
             from_findings: Optional[List[str]] = None,
+            finding_key: str = "",
             round_no: int = 0, mode: str = "ask") -> Decision:
     """Open a decision. ``mode`` is ``human.scope_changes.mode``.
 
@@ -327,6 +336,7 @@ def propose(session_id: str, title: str, why: str,
                     for r in (reject_options or []) if r.strip()]),
         blast_radius=[p.replace("\\", "/") for p in (blast_radius_paths or [])],
         from_findings=list(from_findings or []),
+        finding_key=finding_key or "",
     )
     _write(session_id, decision)
     if status != PENDING:
