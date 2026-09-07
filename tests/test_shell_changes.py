@@ -178,3 +178,35 @@ class ScopeSessionEditsOnlySemantics(CruxTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VolatileArtefactsAreExcluded(CruxTestCase):
+    """Files that churn on their own must not reach a reviewer.
+
+    Surfaced by a real session: a `--debug-file` log inside the repository grew
+    while Claude worked, so it legitimately differed from its baseline and the
+    reviewers spent attention explaining it away.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.write("app.py", "A = 1\n")
+        self.commit("init")
+        self.cfg = config.load(self.repo)
+        baseline.capture("s1", self.repo, self.cfg)
+
+    def test_a_log_growing_during_the_session_is_not_reviewed(self):
+        self.write("session-debug.log", "ligne 1\nligne 2\n")
+        self.write("app.py", "A = 2\n")
+        diff = baseline.compute("s1", self.repo, self.cfg)
+        self.assertEqual(diff.files, ["app.py"])
+
+    def test_tmp_files_are_excluded_too(self):
+        self.write("scratch.tmp", "x\n")
+        self.assertTrue(baseline.compute("s1", self.repo, self.cfg).is_empty)
+
+    def test_a_project_can_still_review_its_own_logs(self):
+        self.write_project_config('scope: { exclude: ["**/*.svg"] }\n')
+        cfg = config.load(self.repo)
+        self.write("kept.log", "contenu\n")
+        self.assertIn("kept.log", baseline.compute("s1", self.repo, cfg).files)

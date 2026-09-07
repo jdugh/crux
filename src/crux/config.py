@@ -71,6 +71,10 @@ DEFAULTS: Dict[str, Any] = {
             "**/*.min.*",
             "**/__snapshots__/**",
             "**/*.svg",
+            # Written *during* a session (debug logs, build output), so they
+            # differ from their baseline through no decision of anyone's.
+            "**/*.log",
+            "**/*.tmp",
         ],
         "max_diff_chars": 60000,
         "max_file_diff_lines": 1500,

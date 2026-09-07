@@ -36,6 +36,7 @@ qui touche au périmètre fonctionnel, il ouvre une décision et vous la pose**.
 | **Aucun appel API obligatoire** | Codex s'authentifie avec votre abonnement ChatGPT (`codex login`). |
 | **Le diff de session ne rate rien** | Il compare le working tree à l'état exact capturé à l'armement — une modification faite par `sed`, un script ou votre éditeur reste visible. |
 | **Aucune écriture dans votre dépôt** | Liste blanche fermée de sous-commandes git en lecture seule. `commit`, `reset`, `checkout`, `stash` lèvent une exception avant d'atteindre le processus. |
+| **Le lanceur est sondé** | `crux setup` exécute chaque lanceur candidat avant de l'inscrire dans les hooks. Sous Windows App Control, un `crux.exe` bloqué n'est jamais retenu. |
 | **Panne technique = fail-open** | Codex absent, réseau coupé, bug de Crux : la session n'est jamais bloquée. |
 | **Décision humaine = fail-closed** | Une décision ouverte tient, même si tout le reste est cassé. Claude ne peut pas la clôturer. |
 | **Le verdict est structurel** | Approuvé ou refusé vient de l'action attachée à l'option choisie, jamais de sa formulation. Une réponse libre ne devient jamais une approbation. |

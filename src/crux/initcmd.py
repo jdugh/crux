@@ -62,6 +62,7 @@ logs:
 DEFAULT_EXCLUDES = [
     "**/*.lock", "**/package-lock.json", "**/dist/**", "**/build/**",
     "**/node_modules/**", "**/*.min.*", "**/__snapshots__/**", "**/*.svg",
+    "**/*.log", "**/*.tmp",
 ]
 
 UI_HINTS = (".tsx", ".jsx", ".vue", ".svelte", ".css", ".scss", ".html")

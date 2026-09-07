@@ -107,6 +107,110 @@ def _ask_user_question_rows() -> List[Tuple[str, str, str]]:
     return rows
 
 
+def _launcher_rows() -> List[Tuple[str, str, str, str]]:
+    """Separate what exists from what actually runs.
+
+    "✓ crux installé" was true and useless while Device Guard refused to spawn
+    the console script: the package was installed, the script was there, and
+    every hook died at spawn. These rows never conflate the two.
+    """
+    from . import launcher as _launcher
+    rows: List[Tuple[str, str, str, str]] = []
+
+    script = _launcher.console_script_path()
+    if script is None:
+        rows.append((DASH, "console-script", "absent",
+                     "sans importance si un lanceur Python fonctionne"))
+        script_ok = None
+    else:
+        probed = _launcher.probe(_launcher.Launcher([str(script)],
+                                                    _launcher.CONSOLE_SCRIPT, ""))
+        script_ok = probed.ok
+        rows.append((OK, "console-script", "présent", str(script)))
+        rows.append((OK if probed.ok else BAD, "  exécutable",
+                     "oui" if probed.ok else "NON — refusé au lancement",
+                     "" if probed.ok else (probed.error or "")[:64]))
+
+    module = _launcher.probe(_launcher.Launcher(
+        [sys.executable, "-m", "crux"], _launcher.PYTHON_MODULE, ""))
+    rows.append((OK if module.ok else BAD, "python -m crux",
+                 "fonctionne" if module.ok else "NE FONCTIONNE PAS",
+                 sys.executable if module.ok else (module.error or "")[:64]))
+
+    chosen = _launcher.load()
+    if chosen is None:
+        rows.append((WARN, "lanceur retenu", "aucun enregistré", "→ crux setup"))
+    else:
+        live = _launcher.probe(_launcher.Launcher(list(chosen.argv),
+                                                  chosen.kind, chosen.source))
+        rows.append((OK if live.ok else BAD, "lanceur retenu",
+                     chosen.display()[:44],
+                     chosen.source if live.ok
+                     else f"NE FONCTIONNE PLUS — {(live.error or '')[:40]} → crux setup"))
+
+    hooks_cmd = _hook_launcher()
+    shim_cmd = _shim_launcher()
+    expected = chosen.argv if chosen else None
+
+    rows.append(_agreement_row("lanceur des hooks", hooks_cmd, expected,
+                               script_ok))
+    rows.append(_agreement_row("lanceur des shims", shim_cmd, expected,
+                               script_ok))
+    return rows
+
+
+def _agreement_row(label: str, actual: Optional[List[str]],
+                   expected: Optional[List[str]],
+                   script_ok: Optional[bool]) -> Tuple[str, str, str, str]:
+    if actual is None:
+        return (WARN, label, "introuvable", "→ crux setup")
+    shown = " ".join(actual)[:44]
+    from . import launcher as _launcher
+    script = _launcher.console_script_path()
+    if script is not None and script_ok is False and Path(actual[0]) == script:
+        return (BAD, label, shown,
+                "pointe sur un exécutable bloqué → crux setup")
+    if expected is not None and list(actual) != list(expected):
+        return (WARN, label, shown, "diffère du lanceur retenu → crux setup")
+    return (OK, label, shown, "")
+
+
+def _hook_launcher() -> Optional[List[str]]:
+    data = _installed_hooks()
+    if not data:
+        return None
+    for groups in data.values():
+        for group in groups or []:
+            for hook in group.get("hooks") or []:
+                args = list(hook.get("args") or [])
+                prefix = args[:-2] if len(args) >= 2 else []
+                return [hook.get("command", "?"), *prefix]
+    return None
+
+
+def _shim_launcher() -> Optional[List[str]]:
+    """Read back what the generated shim really invokes."""
+    import shlex
+    name = "crux.cmd" if os.name == "nt" else "crux"
+    candidate = setupcmd.shim_dir() / name
+    if not candidate.is_file():
+        return None
+    for line in candidate.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("@echo", "REM", "#", "exec")):
+            if not stripped.startswith("exec "):
+                continue
+            stripped = stripped[len("exec "):]
+        try:
+            parts = shlex.split(stripped, posix=(os.name != "nt"))
+        except ValueError:
+            continue
+        parts = [p for p in parts if p not in ("%*", '"$@"', "$@")]
+        if parts:
+            return parts
+    return None
+
+
 def _installed_hooks():
     candidates = [setupcmd.installed_plugin_dir() / "hooks" / "hooks.json",
                   setupcmd.package_plugin_dir() / "hooks" / "hooks.json"]
@@ -223,9 +327,13 @@ def run(probe: bool = False) -> int:
                "modes advise/auto hors MVP (décision produit)")
 
     # --------------------------------------------------------- installation
+    report.section("Lancement")
+    for row_mark, label, value, hint in _launcher_rows():
+        report.row(row_mark, label, value, hint)
+
     report.section("Installation")
     from . import __version__
-    report.row(OK, "crux", __version__)
+    report.row(OK, "crux (paquet)", __version__)
     plugin_dir = setupcmd.installed_plugin_dir()
     report.row(OK if plugin_dir.is_dir() else WARN, "plugin crux-cc",
                "installé" if plugin_dir.is_dir() else "absent",

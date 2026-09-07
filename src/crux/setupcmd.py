@@ -126,42 +126,27 @@ def pin_hook_command(hooks_file: Path) -> Optional[Path]:
             for hook in group.get("hooks") or []:
                 if hook.get("command") == "crux":
                     hook["command"] = command
-                    if extra:
-                        hook["args"] = extra + list(hook.get("args") or [])
+                    # Every event gets the same prefix, so SessionStart and
+                    # SessionEnd can never end up on different launchers.
+                    hook["args"] = extra + list(hook.get("args") or [])
     paths.write_json(hooks_file, data)
     return hooks_file
 
 
 def crux_executable() -> List[str]:
-    """Argv prefix that runs Crux, whatever the install layout.
+    """Argv prefix that actually starts Crux on this machine.
 
-    ``pip install --user`` puts ``crux.exe`` in a Scripts directory that is
-    routinely absent from PATH on Windows, and the hooks invoke ``crux`` by bare
-    name. Falling back to ``<python> -m crux`` always works.
+    Delegates to :mod:`crux.launcher`, which *runs* each candidate instead of
+    checking that a file exists. The previous version preferred the console
+    script on sight; under Device Guard that script exists, is refused at spawn,
+    and every hook died with ``uv_spawn`` while looking merely inert.
     """
-    found = shutil.which("crux")
-    if found and Path(found).parent != shim_dir():
-        return [found]
-    for candidate in (
-        Path(sys.prefix) / "Scripts" / "crux.exe",
-        Path(sys.prefix) / "bin" / "crux",
-    ):
-        if candidate.is_file():
-            return [str(candidate)]
-    try:
-        import sysconfig
-        for scheme in ("nt_user", "posix_user", "nt", "posix_prefix"):
-            if scheme not in sysconfig.get_scheme_names():
-                continue
-            scripts = Path(sysconfig.get_path("scripts", scheme))
-            for name in ("crux.exe", "crux"):
-                candidate = scripts / name
-                if candidate.is_file():
-                    return [str(candidate)]
-    except Exception:
-        pass
-    # Always correct, just slower to start: the module is importable wherever
-    # this interpreter installed it.
+    from . import launcher as _launcher
+    chosen = _launcher.resolve()
+    if chosen is not None:
+        return list(chosen.argv)
+    # Nothing answered a probe. Fall back to this interpreter rather than emit
+    # nothing: `crux doctor` will report the failure explicitly.
     return [sys.executable, "-m", "crux"]
 
 
@@ -177,11 +162,12 @@ exec {invocation} "$@"
 
 
 def write_crux_shim() -> Optional[Path]:
-    """Put `crux` itself on PATH, in the directory the other shims use.
+    """Put `crux` on PATH for every shell, using the one validated launcher.
 
-    Claude Code resolves the hook command from PATH. On Windows a
-    ``pip install --user`` console script usually is not there, so without this
-    every hook would fail silently and the gate would never arm.
+    Windows gets ``crux.cmd`` (cmd.exe and PowerShell) plus an extensionless sh
+    script (Git Bash), and both run the same argv. Having hooks, PowerShell and
+    Git Bash agree is the point: the previous split — .exe for the shims, module
+    for Git Bash — is why the breakage looked intermittent.
     """
     target = shim_dir()
     argv = crux_executable()
@@ -190,27 +176,19 @@ def write_crux_shim() -> Optional[Path]:
         path = target / "crux.cmd"
         path.write_text(CRUX_CMD_SHIM.format(invocation=invocation),
                         encoding="utf-8", newline="\r\n")
-        # Windows also runs Git Bash, which executes neither .cmd nor .ps1 by
-        # bare name. An extensionless sh script alongside covers it, and cmd.exe
-        # ignores it because it is not in PATHEXT.
-        #
-        # It runs the interpreter rather than the console script: MSYS refuses to
-        # exec a .exe living under AppData\Roaming ("Permission denied") even
-        # though cmd.exe and PowerShell run it fine. `python -m crux` works in
-        # every shell, and the console script stays the fast path elsewhere.
+        # Git Bash executes neither .cmd nor .ps1 by bare name, so an
+        # extensionless sh script sits alongside. Same argv, forward slashes.
         sh_path = target / "crux"
-        sh_argv = [sys.executable.replace("\\", "/"), "-m", "crux"]
-        sh_invocation = " ".join(f'"{part}"' if " " in part else part
-                                 for part in sh_argv)
+        sh_invocation = " ".join(
+            '"{}"'.format(part.replace("\\", "/")) if " " in part
+            else part.replace("\\", "/") for part in argv)
         sh_path.write_text(CRUX_SH_SHIM.format(invocation=sh_invocation),
                            encoding="utf-8", newline="\n")
-    else:
-        path = target / "crux"
-        if shutil.which("crux") and Path(shutil.which("crux")).parent != target:
-            return None      # already on PATH from a real install
-        path.write_text(CRUX_SH_SHIM.format(invocation=invocation),
-                        encoding="utf-8", newline="\n")
-        path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
+        return path
+    path = target / "crux"
+    path.write_text(CRUX_SH_SHIM.format(invocation=invocation),
+                    encoding="utf-8", newline="\n")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
     return path
 
 
@@ -287,8 +265,15 @@ def user_config_stub() -> Path:
 
 
 def run_setup(install_plugin_too: bool = True) -> Dict[str, object]:
+    from . import launcher as _launcher
     report: Dict[str, object] = {}
     paths.ensure_dir(paths.home())
+    chosen = _launcher.resolve(refresh=True)
+    if chosen is None:
+        report["launcher_error"] = (
+            "aucun lanceur fonctionnel — lancez `crux doctor` pour le détail")
+    else:
+        report["launcher"] = f"{chosen.display()}   ({chosen.source})"
     report["config"] = str(user_config_stub())
     report["gate_files"] = [str(p) for p in write_gate_files()]
     report["shims"] = [str(p) for p in write_shims()]
