@@ -392,6 +392,29 @@ def compute(session_id: str, repo: Path, cfg,
     return result
 
 
+def content_map(repo: Path, relpaths) -> Dict[str, Optional[str]]:
+    """sha256 of each path's current bytes, or None when it is not there.
+
+    Hashes the working tree, never the edits journal: a change made by `sed`, a
+    formatter or an external editor must be seen exactly like an Edit. This map
+    is what a round journal records and what a later round diffs against to know
+    what has actually moved.
+
+    Lives here rather than in ``review`` so the round-2 planner can read the tree
+    without importing the module that drives Codex. ``review.content_map`` is
+    kept as an alias.
+    """
+    out: Dict[str, Optional[str]] = {}
+    for relpath in relpaths:
+        candidate = repo / relpath
+        try:
+            out[relpath] = (hashlib.sha256(candidate.read_bytes()).hexdigest()
+                            if candidate.is_file() else None)
+        except OSError:
+            out[relpath] = None
+    return out
+
+
 def added_lines(diff_text: str) -> str:
     """Only the added lines - what the router inspects for content signals."""
     return "\n".join(

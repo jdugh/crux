@@ -7,7 +7,6 @@ validate -> dedupe -> promote to human decisions -> render.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import time
 from dataclasses import dataclass, field
@@ -19,7 +18,7 @@ from . import (baseline, capabilities, codex, context, decisions,
 
 SCHEMA_PATH = Path(__file__).resolve().parent / "schema" / "finding.schema.json"
 
-TEST_MARKERS = ("tests", "test", "spec", "__tests__")
+TEST_MARKERS = gitctx.TEST_MARKERS
 
 
 @dataclass
@@ -71,20 +70,9 @@ class RunResult:
         }
 
 
-def project_has_tests(repo: Path) -> bool:
-    try:
-        proc = gitctx.run(repo, "ls-files", check=False)
-    except Exception:
-        return False
-    if proc.returncode != 0:
-        return False
-    for line in proc.stdout.splitlines():
-        lowered = line.lower()
-        if any(f"/{m}/" in f"/{lowered}" for m in TEST_MARKERS):
-            return True
-        if lowered.startswith("test") or "_test." in lowered or ".test." in lowered:
-            return True
-    return False
+# Both moved to modules that do not import `codex`, so the round-2 planner can
+# use them. Kept under their original names: this is where they are used from.
+project_has_tests = gitctx.project_has_tests
 
 
 def classify_attempt(reviewer_results: List[findings.ReviewerResult],
@@ -106,22 +94,10 @@ def classify_attempt(reviewer_results: List[findings.ReviewerResult],
     return state.ATTEMPT_SUCCESS
 
 
-def content_map(repo: Path, relpaths: Sequence[str]) -> Dict[str, Optional[str]]:
-    """sha256 of each path's current bytes, or None when it is not there.
-
-    Hashes the working tree, never the edits journal: a change made by `sed`, a
-    formatter or an external editor must be seen exactly like an Edit. This map
-    is what a later round diffs against to know what has actually moved.
-    """
-    out: Dict[str, Optional[str]] = {}
-    for relpath in relpaths:
-        candidate = repo / relpath
-        try:
-            out[relpath] = (hashlib.sha256(candidate.read_bytes()).hexdigest()
-                            if candidate.is_file() else None)
-        except OSError:
-            out[relpath] = None
-    return out
+# Moved to `baseline` so the round-2 planner can hash the working tree without
+# importing the module that drives Codex. Kept here under its original name:
+# this is where the round journal's content map is written from.
+content_map = baseline.content_map
 
 
 def new_run_id(repo: Path) -> str:

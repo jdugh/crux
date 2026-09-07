@@ -145,6 +145,12 @@ class RouteRow:
     reasons: List[str]
     selected: bool
     note: str = ""
+    # Names of the signals that scored this reviewer, in firing order. `reasons`
+    # holds their human labels; this holds the stable identifiers, so a caller
+    # can tell *which* signal earned a point without matching on French prose.
+    # The round-2 planner needs it to separate the unconditional `always` signal
+    # - which says nothing about the code - from evidence about the delta.
+    signals: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -155,6 +161,12 @@ class RouteResult:
     capped: bool = False
     micro_change: bool = False
     scope_authority: Optional[str] = None
+    # Everything the rules admitted, before `max_selected` truncated it - same
+    # order as `selected`, of which it is a superset. A caller that applies its
+    # own cap needs the uncapped answer: reading `selected` instead loses the
+    # reviewers this cap dropped, and they then look unjustified rather than
+    # capped. Same rules, computed once, no second routing logic.
+    eligible: List[str] = field(default_factory=list)
 
     def explain(self) -> str:
         lines = ["Signaux déclenchés : " + (", ".join(self.fired) or "aucun"), ""]
@@ -196,6 +208,7 @@ def select(ctx: RouteContext, cfg,
 
     scores: Dict[str, int] = {r: 0 for r in candidates}
     reasons: Dict[str, List[str]] = {r: [] for r in candidates}
+    hits: Dict[str, List[str]] = {r: [] for r in candidates}
     fired: List[str] = []
 
     for signal in SIGNALS:
@@ -210,6 +223,7 @@ def select(ctx: RouteContext, cfg,
             if reviewer in scores:
                 scores[reviewer] += points
                 reasons[reviewer].append(signal.label)
+                hits[reviewer].append(signal.name)
 
     # A micro-change caps at the always-on reviewer. Two exclusions matter:
     # the comparison must match the selection rule (>= not >), and a deletion is
@@ -237,20 +251,21 @@ def select(ctx: RouteContext, cfg,
                 chosen.append(extra)
 
     chosen.sort(key=lambda r: (-scores.get(r, 0), r))
+    eligible = list(chosen)
     capped = False
     if not select_all and not only and len(chosen) > max_selected:
         chosen = chosen[:max_selected]
         capped = True
 
     rows = [RouteRow(reviewer=r, score=scores[r], reasons=reasons[r],
-                     selected=r in chosen)
+                     selected=r in chosen, signals=hits[r])
             for r in candidates]
     for row in rows:
         if row.reviewer in never:
             row.note = "never"
 
     return RouteResult(selected=chosen, rows=rows, fired=fired,
-                       capped=capped, micro_change=micro)
+                       capped=capped, micro_change=micro, eligible=eligible)
 
 
 def build_context(diff, repo, project_has_tests: bool) -> RouteContext:

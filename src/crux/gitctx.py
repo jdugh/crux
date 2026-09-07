@@ -225,3 +225,31 @@ def working_tree_diff(cwd: Path, base: str = "HEAD") -> str:
 
 def looks_binary(data: bytes) -> bool:
     return b"\x00" in data[:8000]
+
+
+# Directory and file names that mark a test tree. Used to decide whether a
+# project has tests at all, which the router turns into the `code_without_tests`
+# signal.
+TEST_MARKERS = ("tests", "test", "spec", "__tests__")
+
+
+def project_has_tests(repo: Path) -> bool:
+    """Does this repository track any tests?
+
+    Lives here rather than in ``review`` so the round-2 planner can ask without
+    importing the module that drives Codex. ``review.project_has_tests`` is kept
+    as an alias.
+    """
+    try:
+        proc = run(repo, "ls-files", check=False)
+    except Exception:
+        return False
+    if proc.returncode != 0:
+        return False
+    for line in proc.stdout.splitlines():
+        lowered = line.lower()
+        if any(f"/{m}/" in f"/{lowered}" for m in TEST_MARKERS):
+            return True
+        if lowered.startswith("test") or "_test." in lowered or ".test." in lowered:
+            return True
+    return False

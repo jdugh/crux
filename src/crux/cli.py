@@ -112,7 +112,15 @@ def cmd_review(args) -> int:
 
 
 def cmd_route(args) -> int:
-    from . import baseline, review, router, context
+    """Explain the selection. Never runs Codex, in either form.
+
+    Plain `crux route` is the v0.1 answer: the router over the whole session
+    diff. `--explain` adds the round-2 plan once a round has been recorded -
+    which reviewers a second round would re-run, under which trigger, and which
+    are skipped for which reason. It is a projection, not an execution: nothing
+    here selects reviewers for `review.run()`.
+    """
+    from . import baseline, gitctx, round2, router, context
     cwd = Path.cwd()
     cfg = _config_or_exit(cwd)
     repo = _repo_or_exit(cwd)
@@ -120,11 +128,26 @@ def cmd_route(args) -> int:
     diff = baseline.compute(session, repo, cfg)
     if diff.is_empty:
         _out("Aucune modification de session : aucun reviewer à sélectionner.")
-        return EXIT_OK
-    ctx = router.build_context(diff, repo, review.project_has_tests(repo))
-    result = router.select(ctx, cfg, available=context.available_personas(repo))
-    result.scope_authority = context.pick_scope_authority(result.selected, repo)
-    _out(result.explain())
+    else:
+        ctx = router.build_context(diff, repo, gitctx.project_has_tests(repo))
+        result = router.select(ctx, cfg,
+                               available=context.available_personas(repo))
+        result.scope_authority = context.pick_scope_authority(
+            result.selected, repo)
+        _out(result.explain())
+
+    # Deliberately outside the branch above. An empty *session* diff is not an
+    # empty *delta*: reverting a file to its baseline after a round leaves
+    # nothing to review against the baseline while being a real change against
+    # the round. Returning early there hid the plan exactly when it had
+    # something to say.
+    if args.explain and round2.has_round_history(session):
+        plan = round2.build(session, repo, cfg, extra_paths=list(diff.files))
+        if not diff.is_empty:
+            _out("")
+            _out("---")
+        _out("")
+        _out(plan.explain())
     return EXIT_OK
 
 
@@ -439,7 +462,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     route_p = sub.add_parser("route", help="expliquer la sélection des reviewers")
     route_p.add_argument("--session")
-    route_p.add_argument("--explain", action="store_true")
+    route_p.add_argument(
+        "--explain", action="store_true",
+        help="ajoute le plan du round suivant (déclencheurs par reviewer) "
+             "quand un round a déjà été enregistré")
     route_p.set_defaults(func=cmd_route)
 
     resolve_p = sub.add_parser("resolve", help="arbitrage technique d'un finding")
