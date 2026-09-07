@@ -87,11 +87,24 @@ def load_manifest(session_id: str) -> Optional[Manifest]:
     return Manifest.from_dict(raw) if isinstance(raw, dict) else None
 
 
-def capture(session_id: str, repo: Path, cfg) -> Manifest:
+def capture(session_id: str, repo: Path, cfg,
+            head: Optional[str] = None, branch: Optional[str] = None) -> Manifest:
     """Snapshot the working tree. Idempotent: an existing baseline is kept.
 
     Re-capturing would silently move the reference point and hide work Claude
     already did, so the first capture of a session wins.
+
+    ``head`` and ``branch`` may be supplied by a caller that has already asked
+    git - SessionStart resolves the work tree, its root, HEAD and the branch in
+    a single ``rev-parse``, and passing them here spares two more git processes.
+    Omit them and they are looked up exactly as before.  Supplying them is also
+    slightly *more* correct: the whole reference point then comes from one
+    observation of the repository rather than three spread over 150 ms.
+
+    Passing ``None`` is treated as "not supplied" and falls back to asking git,
+    which in the one case where that matters - a repository with no commit yet -
+    returns ``None`` again. Same answer, one extra process, in a repository
+    nobody has committed to.
     """
     existing = load_manifest(session_id)
     if existing is not None:
@@ -101,8 +114,8 @@ def capture(session_id: str, repo: Path, cfg) -> Manifest:
     max_total = int(cfg.get("scope.baseline.max_total_bytes", 50 * 1024 * 1024))
 
     manifest = Manifest(
-        head=gitctx.head_sha(repo),
-        branch=gitctx.current_branch(repo),
+        head=head if head is not None else gitctx.head_sha(repo),
+        branch=branch if branch is not None else gitctx.current_branch(repo),
         captured_at=state.now_iso(),
     )
 

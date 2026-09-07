@@ -175,7 +175,8 @@ def _env_gate(env: Dict[str, str]) -> Optional[str]:
 
 def resolve_gate(cfg: Config,
                  session_id: Optional[str] = None,
-                 env: Optional[Dict[str, str]] = None) -> GateDecision:
+                 env: Optional[Dict[str, str]] = None,
+                 session_state: Optional[SessionState] = None) -> GateDecision:
     """Resolve the gate. First source that answers wins.
 
     1. CRUX_DISABLE        absolute kill switch
@@ -184,6 +185,12 @@ def resolve_gate(cfg: Config,
     4. project .crux.yml   gate.mode
     5. ~/.crux/config.yml  gate.mode
     6. built-in default    off
+
+    ``session_state`` lets a caller that has already loaded the session hand it
+    over instead of paying for a second read of the same file - and, more to the
+    point, lets a handler work from a single in-memory state rather than
+    re-reading it at each step. Omit it and the behaviour is exactly what it
+    always was.
     """
     env = dict(os.environ if env is None else env)
 
@@ -191,7 +198,8 @@ def resolve_gate(cfg: Config,
         return GateDecision("off", "CRUX_DISABLE")
 
     if session_id:
-        override = load(session_id).gate_override
+        st = session_state if session_state is not None else load(session_id)
+        override = st.gate_override
         if override in GATE_MODES:
             return GateDecision(override, "session (/crux:on)")
 
@@ -284,19 +292,32 @@ def last_written_sha(session_id: str, relpath: str) -> Optional[str]:
 STALE_AFTER_SECONDS = 24 * 3600
 
 
+def register_into(st: SessionState, repo: Optional[Path]) -> SessionState:
+    """The registration itself, on an in-memory state. Does not write.
+
+    Split out of ``register`` so SessionStart can apply it to the same object it
+    later stores the baseline result on, and write once. Two read-modify-write
+    cycles over one file in one hook are two windows in which a concurrent
+    writer's change is read and then written back over; they also let the two
+    cycles disagree, which is how ``st.repo`` ended up stored resolved by this
+    function and unresolved by the caller that wrote after it.
+    """
+    st.repo = str(Path(repo).resolve()) if repo else st.repo
+    if not st.started_at:
+        st.started_at = now_iso()
+    st.ended_at = None
+    return st
+
+
 def register(session_id: str, repo: Optional[Path]) -> SessionState:
-    """Record that ``session_id`` belongs to ``repo``.
+    """Record that ``session_id`` belongs to ``repo``, and store it.
 
     Written on SessionStart whether or not the gate is armed. This is the only
     thing an unarmed session leaves behind: a few bytes inside Crux's own
     directory, no output, nothing in the project. It is what lets `/crux:on` and
     `crux decision propose` find the right session without being told.
     """
-    st = load(session_id)
-    st.repo = str(Path(repo).resolve()) if repo else st.repo
-    if not st.started_at:
-        st.started_at = now_iso()
-    st.ended_at = None
+    st = register_into(load(session_id), repo)
     save(st)
     return st
 

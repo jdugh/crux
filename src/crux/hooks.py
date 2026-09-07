@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import sys
+import threading
 import traceback
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -27,6 +28,26 @@ from typing import Any, Dict, Optional
 from . import (baseline, config, decisions, findings, intent, paths, state)
 
 MAX_PROMPT_CHARS = 20000
+
+# How long a handler waits for Claude Code to finish writing the hook payload.
+# Ten seconds is half the 20 s budget Claude Code allows SessionStart and Stop,
+# so Crux gives up, says so, and lets the session proceed while there is still
+# time - against a payload that in practice arrives in under a millisecond. For
+# the 5 s events the harness kills us first, to exactly the same effect.
+PAYLOAD_TIMEOUT_SECONDS = 10.0
+PAYLOAD_TIMEOUT_ENV = "CRUX_STDIN_TIMEOUT_SECONDS"
+
+
+def _payload_timeout() -> float:
+    raw = (os.environ.get(PAYLOAD_TIMEOUT_ENV) or "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            return PAYLOAD_TIMEOUT_SECONDS
+        if value > 0:
+            return value
+    return PAYLOAD_TIMEOUT_SECONDS
 
 
 def _log(message: str) -> None:
@@ -44,6 +65,58 @@ def _log(message: str) -> None:
         pass
 
 
+def _read_stdin_bounded(timeout: float) -> Optional[bytes]:
+    """All of stdin, or None if EOF has not come within ``timeout``.
+
+    ``read()`` waits for EOF, and nothing in Crux can make that happen: if
+    Claude Code has not closed the pipe, the handler waits for ever and the only
+    thing that ends it is the harness killing the process at its own timeout.
+    That is the shape of the 28.7 s run - a hook that never decided anything,
+    reported as a Crux timeout.
+
+    A reader thread makes the wait bounded.  It cannot make it cancellable: the
+    blocking ``ReadFile`` underneath is not interruptible, so on timeout the
+    thread is still in it, and the caller must not return normally - see
+    ``_give_up_on_payload``.
+    """
+    box: Dict[str, bytes] = {}
+
+    def reader() -> None:
+        try:
+            buffer = getattr(sys.stdin, "buffer", None)
+            box["raw"] = (buffer.read() if buffer is not None
+                          else sys.stdin.read().encode("utf-8", "surrogateescape"))
+        except (OSError, ValueError, AttributeError):
+            box["raw"] = b""
+
+    thread = threading.Thread(target=reader, name="crux-stdin", daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        return None
+    return box.get("raw", b"")
+
+
+def _give_up_on_payload(timeout: float) -> None:
+    """Leave the process at once, exit 0, with the reader thread still blocked.
+
+    ``os._exit`` rather than a return, and this is measured, not defensive: a
+    daemon thread parked inside ``BufferedReader.read`` still holds that
+    buffer's lock, so interpreter shutdown dies in ``_enter_buffered_busy`` with
+    an access violation - exit code 0xC0000005, a full second after the timeout.
+    A fail-open that ends in a crashed hook is not a fail-open.  Skipping
+    finalisation is safe here precisely because nothing has been produced yet:
+    no payload means no session id, which the handlers already treat as "capture
+    nothing, claim nothing, say why" - so there is no banner to withhold, no
+    partial baseline to disown and no buffered stdout to lose.
+    """
+    _log(f"charge utile du hook non reçue en {timeout:g} s (stdin toujours "
+         f"ouvert côté Claude Code) : handler inerte, aucune baseline capturée, "
+         f"aucune bannière — sortie 0")
+    sys.stderr.flush()
+    os._exit(0)
+
+
 def read_payload() -> Dict[str, Any]:
     """Read the hook payload as UTF-8, always, whatever the console codepage.
 
@@ -51,13 +124,14 @@ def read_payload() -> Dict[str, Any]:
     encoding, which on a French Windows console is cp1252: an answer containing
     "é" or "—" came back mojibake and was persisted that way into the ledgers.
     Decoding the raw bytes ourselves removes the platform from the equation.
+
+    The read is bounded; see ``_read_stdin_bounded``. An empty or unparsable
+    payload still returns ``{}``, exactly as before - a *late* payload is a
+    different failure from a *bad* one and only the first can wedge a session.
     """
-    try:
-        buffer = getattr(sys.stdin, "buffer", None)
-        raw = buffer.read() if buffer is not None else sys.stdin.read().encode(
-            "utf-8", "surrogateescape")
-    except (OSError, ValueError, AttributeError):
-        return {}
+    raw = _read_stdin_bounded(_payload_timeout())
+    if raw is None:
+        _give_up_on_payload(_payload_timeout())   # does not return
     if not raw.strip():
         return {}
     try:
@@ -115,29 +189,51 @@ def _cwd(payload: Dict[str, Any]) -> Path:
     return Path(value) if value else Path.cwd()
 
 
-def _resolve(payload: Dict[str, Any]):
-    """(config, gate, repo). Returns gate 'off' on any configuration problem."""
+def _save_session(st) -> bool:
+    """Persist the session state. False, and a log line, when it cannot be."""
+    try:
+        state.save(st)
+        return True
+    except Exception as exc:      # noqa: BLE001 - I1 over a state write
+        _log(f"enregistrement de session impossible: {exc}")
+        return False
+
+
+def _resolve(payload: Dict[str, Any], session_state=None):
+    """(config, gate, repo_info). Returns gate 'off' on any configuration problem.
+
+    ``repo_info`` is a ``gitctx.RepoInfo`` - root, HEAD and branch resolved in a
+    single ``git rev-parse`` - or None when ``cwd`` is not in a work tree. The
+    handlers that only need the root read ``.root``; SessionStart also uses the
+    HEAD and branch, which is why they are resolved here rather than a second
+    time inside the baseline capture.
+
+    ``session_state`` is an already-loaded ``SessionState`` for this session, so
+    the gate override does not cost a second read of the same file.
+    """
     cwd = _cwd(payload)
     try:
         cfg = config.load(cwd)
     except Exception as exc:
         _log(f"config invalide, gate non armé: {exc}")
         return None, state.GateDecision("off", "configuration invalide"), None
-    gate = state.resolve_gate(cfg, _session_id(payload))
+    gate = state.resolve_gate(cfg, _session_id(payload),
+                              session_state=session_state)
     from . import gitctx
-    repo = None
+    info = None
     try:
-        if gitctx.is_repo(cwd):
-            repo = gitctx.repo_root(cwd)
+        info = gitctx.describe(cwd)
     except Exception as exc:
+        # Includes GitTimeout: a git that stopped answering is a technical
+        # failure, never the statement "this is not a repository".
         _log(f"résolution du dépôt impossible depuis {cwd}: {exc}")
-        repo = None
-    if repo is None and gate.armed:
+        info = None
+    if info is None and gate.armed:
         # Armed but nowhere to work: stay inert (I1), but say so, otherwise this
         # is indistinguishable from "not armed" when diagnosing.
         _log(f"gate armé ({gate.mode}, {gate.source}) mais {cwd} n'est pas "
              f"résolu comme un dépôt git — handler inerte")
-    return cfg, gate, repo
+    return cfg, gate, info
 
 
 # Events whose stdout is a structured hook payload, so a diagnostic can be
@@ -184,8 +280,21 @@ def _guard(handler):
 @_guard
 def session_start() -> int:
     payload = read_payload()
-    cfg, gate, repo = _resolve(payload)
     session_id = _session_id(payload)
+
+    # One read of the session file for the whole handler, one write at the end.
+    # It used to be three reads and two writes, and the writes were the problem,
+    # not their cost. Two read-modify-write cycles over one file in a single
+    # hook mean two windows in which a concurrent writer - `/crux:on` setting an
+    # override, another handler - has its change read and then written back over
+    # by the second cycle. They also disagreed with each other: `register()`
+    # stored the repository resolved, the second cycle stored it unresolved,
+    # and only the resolved form is what `active_sessions` matches on. One
+    # object, written once, has neither problem.
+    st = state.load(session_id) if session_id else None
+
+    cfg, gate, info = _resolve(payload, session_state=st)
+    repo = info.root if info is not None else None
 
     # Register session -> repo whether or not the gate is armed. This is the one
     # thing an unarmed session leaves behind: a few bytes inside Crux's own
@@ -193,13 +302,12 @@ def session_start() -> int:
     # from inside a session has no way to know which session it belongs to, and
     # `crux decision propose` once wrote D1 into a shared `default` session while
     # the hooks enforced a different one.
-    if session_id and repo is not None:
-        try:
-            state.register(session_id, repo)
-        except Exception as exc:
-            _log(f"enregistrement de session impossible: {exc}")
+    if st is not None and repo is not None:
+        state.register_into(st, repo)
 
     if not gate.armed or repo is None or cfg is None:
+        if st is not None:
+            _save_session(st)
         return 0
 
     # The banner is a claim, and it must be earned. Without a session id there
@@ -215,18 +323,25 @@ def session_start() -> int:
         return 0
 
     try:
-        manifest = baseline.capture(session_id, repo, cfg)
-        st = state.load(session_id)
-        st.repo = str(repo)
-        st.head = manifest.head
-        st.branch = manifest.branch
-        st.baseline_captured = True
-        if not st.armed_at:
-            st.armed_at = state.now_iso()
-        state.save(st)
+        # HEAD and branch come from the single rev-parse `_resolve` already ran,
+        # so the whole reference point is one observation of the repository.
+        manifest = baseline.capture(session_id, repo, cfg,
+                                    head=info.head, branch=info.branch)
     except Exception as exc:
         _log(f"capture de baseline impossible pour {session_id}: {exc!r} — "
              f"bannière supprimée, la session n'est pas réellement protégée")
+        _save_session(st)     # the registration must survive a failed capture
+        return 0
+
+    st.head = manifest.head
+    st.branch = manifest.branch
+    st.baseline_captured = True
+    if not st.armed_at:
+        st.armed_at = state.now_iso()
+    if not _save_session(st):
+        # The banner claims a protection backed by this file. If it could not be
+        # written, the claim is not earned - stay quiet, as when there is no
+        # baseline at all.
         return 0
 
     _emit({"hookSpecificOutput": {
@@ -255,7 +370,7 @@ def user_prompt() -> int:
     prompt Claude receives byte-for-byte unchanged.
     """
     payload = read_payload()
-    cfg, gate, _repo = _resolve(payload)
+    cfg, gate, _info = _resolve(payload)
     if not gate.armed:
         return 0
     session_id = _session_id(payload)
@@ -269,7 +384,8 @@ def user_prompt() -> int:
 @_guard
 def post_edit() -> int:
     payload = read_payload()
-    cfg, gate, repo = _resolve(payload)
+    cfg, gate, info = _resolve(payload)
+    repo = info.root if info is not None else None
     if not gate.armed or repo is None:
         return 0
     session_id = _session_id(payload)
@@ -306,7 +422,7 @@ def post_ask() -> int:
     Claude Code - not from an argument a caller could choose.
     """
     payload = read_payload()
-    cfg, gate, _repo = _resolve(payload)
+    cfg, gate, _info = _resolve(payload)
     if not gate.armed:
         return 0
     session_id = _session_id(payload)
@@ -418,7 +534,8 @@ def stop() -> int:
     if kill_switch_engaged():
         return 0
 
-    cfg, gate, repo = _resolve(payload)
+    cfg, gate, info = _resolve(payload)
+    repo = info.root if info is not None else None
     session_id = _session_id(payload)
 
     # ---- I2: an established human decision outranks the gate --------------
