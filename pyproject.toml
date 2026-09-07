@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crux-review"
+version = "0.1.0"
+description = "Cross-model review gate: Claude Code builds, Codex CLI challenges, the human decides."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Jonathan Durand" }]
+keywords = ["claude-code", "codex", "code-review", "ai", "agent"]
+dependencies = ["PyYAML>=5.4"]
+
+[project.optional-dependencies]
+schema = ["jsonschema>=4"]
+
+[project.scripts]
+crux = "crux.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+crux = [
+    "personas/*.md",
+    "schema/*.json",
+    "plugin/.claude-plugin/*.json",
+    "plugin/hooks/*.json",
+    "plugin/commands/*.md",
+    "plugin/skills/*/*.md",
+]

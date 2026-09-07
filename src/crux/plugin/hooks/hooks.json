@@ -1,0 +1,105 @@
+{
+  "_comment": [
+    "Exec form (command + args) on purpose: it bypasses every quoting",
+    "difference between sh -c, Git Bash and PowerShell, so this file is",
+    "byte-identical on Windows and Linux.",
+    "No hook calls Codex. No timeout exceeds 20 seconds.",
+    "There is deliberately NO PreToolUse matcher on AskUserQuestion: in the",
+    "default `human` mode the mechanism that could answer on your behalf is",
+    "not installed at all. tests/test_never_answers.py enforces this."
+  ],
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "crux",
+            "args": [
+              "hook",
+              "session-start"
+            ],
+            "timeout": 20,
+            "statusMessage": "Crux — capture de la baseline"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "crux",
+            "args": [
+              "hook",
+              "user-prompt"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "crux",
+            "args": [
+              "hook",
+              "post-edit"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "crux",
+            "args": [
+              "hook",
+              "post-ask"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "crux",
+            "args": [
+              "hook",
+              "stop"
+            ],
+            "timeout": 20,
+            "statusMessage": "Crux — vérification du gate"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "crux",
+            "args": [
+              "hook",
+              "session-end"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

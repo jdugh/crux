@@ -1,0 +1,17 @@
+{
+  "verdict": "changes_requested",
+  "reviewer": "code-quality",
+  "summary": "Le support HEIC disparait.",
+  "scope": {
+    "status": "scope_change",
+    "assessment": "Une capacite est retiree sans demande.",
+    "changes": [{
+      "kind": "removed_capability",
+      "description": "L implementation retire le support des fichiers HEIC.",
+      "evidence": "src/formats.py:1",
+      "alternatives": ["Conserver HEIC via pillow-heif"],
+      "requires_human_decision": true
+    }]
+  },
+  "findings": []
+}

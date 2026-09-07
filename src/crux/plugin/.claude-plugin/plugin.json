@@ -1,0 +1,17 @@
+{
+  "name": "crux-cc",
+  "displayName": "Crux",
+  "version": "0.1.0",
+  "description": "Review gate: Claude builds, Codex challenges, the human decides. Inert until armed.",
+  "author": {
+    "name": "Jonathan Durand"
+  },
+  "license": "MIT",
+  "keywords": [
+    "review",
+    "codex",
+    "human-in-the-loop"
+  ],
+  "defaultEnabled": true,
+  "hooks": "./hooks/hooks.json"
+}

@@ -1,0 +1,63 @@
+{
+  "$comment": "Strict-mode structured output: every object must set additionalProperties:false AND list every one of its properties in `required`. Optional fields are expressed as nullable types, never by omission from `required` - the API rejects the schema outright otherwise.",
+  "type": "object",
+  "required": ["verdict", "reviewer", "summary", "scope", "findings"],
+  "additionalProperties": false,
+  "properties": {
+    "verdict": { "enum": ["approve", "changes_requested"] },
+    "reviewer": { "type": "string" },
+    "summary": { "type": "string" },
+    "scope": {
+      "type": "object",
+      "required": ["status", "assessment", "changes"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "enum": ["within_scope", "scope_change", "uncertain"] },
+        "assessment": { "type": "string" },
+        "changes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["kind", "description", "evidence", "alternatives",
+                         "requires_human_decision"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "enum": ["added_feature", "removed_capability",
+                         "behavior_change", "ux_change", "api_change",
+                         "data_format_change", "incompatibility",
+                         "product_decision"]
+              },
+              "description": { "type": "string" },
+              "evidence": { "type": ["string", "null"] },
+              "alternatives": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "requires_human_decision": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["severity", "confidence", "file", "line", "title",
+                     "description", "suggestion", "requires_human_decision"],
+        "additionalProperties": false,
+        "properties": {
+          "severity": { "enum": ["low", "medium", "high", "critical"] },
+          "confidence": { "enum": ["low", "medium", "high"] },
+          "file": { "type": ["string", "null"] },
+          "line": { "type": ["integer", "null"] },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "suggestion": { "type": ["string", "null"] },
+          "requires_human_decision": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}
