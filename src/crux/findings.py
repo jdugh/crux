@@ -151,6 +151,12 @@ class Finding:
     # collided; see FINDING_KEY_VERSION for why collisions must not merge.
     occurrence: int = 1
     reviewers: List[str] = field(default_factory=list)
+    # Reiteration (1c). `reiterates` is the id of the earlier finding this one
+    # repeats, matched by *safe* identity only - an ambiguous key never matches.
+    # `insistence` is set when that earlier finding was `rejected` by Claude: the
+    # reviewer may say it once more, visibly, but it no longer blocks.
+    reiterates: Optional[str] = None
+    insistence: bool = False
 
     def __post_init__(self) -> None:
         """Backfill the two derived identities.
@@ -172,6 +178,7 @@ class Finding:
             "requires_human_decision": self.requires_human_decision,
             "key": self.key, "occurrence": self.occurrence,
             "identity": self.identity, "reviewers": list(self.reviewers),
+            "reiterates": self.reiterates, "insistence": self.insistence,
         }
 
     @classmethod
@@ -407,12 +414,141 @@ def ambiguous_keys(found: List[Finding]) -> set:
     return {key for key, total in counts.items() if total > 1}
 
 
+def is_blocking(finding: Finding, block_on: str) -> bool:
+    """The single severity gate. Three exclusions, and only three.
+
+    * ``requires_human_decision`` - promoted, no longer Claude's to resolve;
+    * ``insistence`` - a remark Claude already rejected with a technical reason.
+      The reviewer may restate it once, visibly, but a rejection Claude is
+      entitled to make must not come back as an obligation; that is how a
+      disagreement becomes an unbounded escalation over three rounds. See
+      ``mark_reiterations``.
+    * severity below the configured floor.
+
+    Used by ``blocking`` (the round's report) and by ``unarbitrated`` (D4), so
+    the set of findings Claude owes an answer for and the set the report calls
+    blocking cannot drift apart.
+    """
+    if finding.requires_human_decision or finding.insistence:
+        return False
+    return finding.blocking_rank >= SEVERITY_RANK.get(
+        block_on, SEVERITY_RANK["high"])
+
+
 def blocking(found: List[Finding], block_on: str) -> List[Finding]:
-    """Findings severe enough to hold the turn open. Promoted ones are excluded:
-    they are no longer Claude's to resolve."""
-    floor = SEVERITY_RANK.get(block_on, SEVERITY_RANK["high"])
-    return [f for f in found
-            if not f.requires_human_decision and f.blocking_rank >= floor]
+    """Findings severe enough to hold the turn open."""
+    return [f for f in found if is_blocking(f, block_on)]
+
+
+# ------------------------------------------------------------ reiterations ---
+def rejected_key_index(session_id: str,
+                       up_to_round: Optional[int] = None
+                       ) -> Dict[str, Dict[str, Any]]:
+    """``finding_key`` -> the earlier finding Claude *rejected*, safely matched.
+
+    Built over every recorded round, not just the last one. That is what bounds
+    the escalation `max_rounds > 2` would otherwise allow: once a remark has been
+    rejected with a technical reason, it stays a non-blocking insistence for the
+    rest of the session rather than becoming blocking again two rounds later.
+
+    Safety, in order:
+
+    * a key claimed by more than one finding *anywhere* in the session is dropped
+      outright - an ambiguous key never matches, so a reiteration is never
+      inferred from a collision (see ``FINDING_KEY_VERSION``);
+    * only ``rejected`` qualifies. ``deferred`` is a parking decision, not a
+      dispute, and ``accepted`` reappearing means the reviewer judges the fix
+      insufficient - a normal finding, blocking on its own severity.
+    """
+    settled = resolutions(session_id)
+    counts = session_key_counts(session_id, up_to_round=up_to_round)
+    candidates: Dict[str, Dict[str, Any]] = {}
+    for payload in load_rounds(session_id):
+        round_no = payload.get("round")
+        if up_to_round is not None and (round_no or 0) >= up_to_round:
+            continue
+        promoted = payload.get("promoted") or {}
+        for raw in payload.get("findings") or []:
+            if not isinstance(raw, dict):
+                continue
+            key = raw.get("key") or ""
+            finding_id = raw.get("id") or ""
+            if not key:
+                continue
+            if finding_id in promoted or raw.get("requires_human_decision"):
+                continue
+            status = str((settled.get(finding_id) or {}).get("status") or "")
+            if status != REJECTED:
+                continue
+            candidates.setdefault(key, {
+                "id": finding_id,
+                "round": round_no,
+                "reason": str((settled.get(finding_id) or {}).get("reason") or ""),
+            })
+    return {key: value for key, value in candidates.items()
+            if counts.get(key) == 1}
+
+
+def session_key_counts(session_id: str,
+                       up_to_round: Optional[int] = None) -> Dict[str, int]:
+    """``finding_key`` -> the most findings that ever claimed it in ONE round.
+
+    The cross-round counterpart of ``round2.safe_key_index``, and the per-round
+    scope is the whole subtlety. Ambiguity is a *collision*: two different
+    remarks that the two-field key cannot tell apart. That can only happen inside
+    a single round, where both exist at once and nothing says which is which.
+
+    The same key appearing again in a later round is the opposite of ambiguity -
+    it is the reviewer restating a remark, which is exactly what a reiteration
+    is. Counting occurrences session-wide would have made every repetition look
+    like a collision, so a rejected finding restated twice would have escaped the
+    insistence rule and become blocking again at round 3: the unbounded
+    escalation §8 forbids.
+
+    A value of 1 therefore means "this key designates one remark, in every round
+    it appears in" and is safe to match on. Anything higher is a real collision
+    and must never match.
+    """
+    peak: Dict[str, int] = {}
+    for payload in load_rounds(session_id):
+        if up_to_round is not None and (payload.get("round") or 0) >= up_to_round:
+            continue
+        seen: Dict[str, int] = {}
+        for raw in payload.get("findings") or []:
+            if not isinstance(raw, dict):
+                continue
+            key = raw.get("key") or ""
+            if key:
+                seen[key] = seen.get(key, 0) + 1
+        for key, count in seen.items():
+            peak[key] = max(peak.get(key, 0), count)
+    return peak
+
+
+def mark_reiterations(found: List[Finding],
+                      rejected: Dict[str, Dict[str, Any]]) -> List[Finding]:
+    """Flag the findings that repeat something Claude already rejected.
+
+    Mutates in place and returns the same list, so the caller keeps one object
+    graph. A finding whose key is not in ``rejected`` - unknown, previously
+    accepted or deferred - is untouched and stays a normal finding.
+
+    Ambiguity is checked on BOTH sides, and the second side is not redundant.
+    ``rejected`` only guarantees its keys were unambiguous in the rounds it read;
+    it says nothing about *this* round. A key rejected once at round 1 and
+    claimed by two genuinely different findings at round 2 would otherwise mark
+    both as insistences, and both would leave the blocking set and the D4
+    obligation at once - one arbitration silently settling a remark it never saw,
+    which is exactly the false equivalence ``FINDING_KEY_VERSION`` forbids.
+    """
+    ambiguous = ambiguous_keys(found)
+    for finding in found:
+        earlier = rejected.get(finding.key)
+        if not earlier or finding.key in ambiguous:
+            continue
+        finding.reiterates = earlier.get("id") or None
+        finding.insistence = True
+    return found
 
 
 def to_promote(found: List[Finding]) -> List[Finding]:
@@ -446,7 +582,10 @@ def save_round(session_id: str, round_no: int, found: List[Finding],
                scope_authority: Optional[str] = None,
                failed_reviewers: Optional[List[str]] = None,
                degraded: bool = False,
-               diff: Optional[Dict[str, Any]] = None) -> None:
+               diff: Optional[Dict[str, Any]] = None,
+               skipped: Optional[List[Dict[str, Any]]] = None,
+               delta_paths: Optional[List[str]] = None,
+               targeting: str = "") -> None:
     """Persist one round.
 
     ``selected``, ``scope_authority`` and ``diff`` are what a later round needs
@@ -454,6 +593,14 @@ def save_round(session_id: str, round_no: int, found: List[Finding],
     path to the sha256 of its bytes *at review time*: hashing the working tree
     rather than the edits journal is what keeps the round-to-round delta
     independent of the tool that made the change.
+
+    ``skipped``, ``delta_paths`` and ``targeting`` are what 1c added: which
+    reviewers the targeting spared and for which named reason, what the round was
+    targeted at, and whether it was targeted at all. They are read only by the
+    report - no plan is ever rebuilt from them - so they are additive fields on
+    the same schema version rather than a migration: bumping the version would
+    make every journal written by 1a/1b unanchorable and silently send a live
+    session back to the full router.
     """
     paths.write_json(findings_path(session_id, round_no), {
         "round": round_no,
@@ -466,6 +613,9 @@ def save_round(session_id: str, round_no: int, found: List[Finding],
         "diff": dict(diff) if diff else dict(EMPTY_ROUND_DIFF),
         "findings": [f.to_dict() for f in found],
         "promoted": promoted,
+        "skipped": list(skipped or []),
+        "delta_paths": list(delta_paths or []),
+        "targeting": targeting,
     })
 
 
@@ -489,6 +639,9 @@ def _backfill_round(payload: Dict[str, Any]) -> Dict[str, Any]:
     payload.setdefault("scope_authority", None)
     payload.setdefault("failed_reviewers", [])
     payload.setdefault("degraded", False)
+    payload.setdefault("skipped", [])
+    payload.setdefault("delta_paths", [])
+    payload.setdefault("targeting", "")
     if not isinstance(payload.get("diff"), dict):
         payload["diff"] = dict(EMPTY_ROUND_DIFF)
     payload["diff"].setdefault("fingerprint", "")
@@ -648,7 +801,6 @@ def unarbitrated(session_id: str, block_on: str) -> List[Finding]:
             if raw.get("requires_human_decision"):
                 continue
             replayed = Finding.from_dict(raw)
-            if replayed.blocking_rank >= SEVERITY_RANK.get(
-                    block_on, SEVERITY_RANK["high"]):
+            if is_blocking(replayed, block_on):
                 out.append(replayed)
     return out

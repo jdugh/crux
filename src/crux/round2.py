@@ -1,10 +1,14 @@
 """Which reviewers a second round would re-run, why, and against what delta.
 
 This module *plans*. It never runs Codex, never opens, closes or touches a human
-decision, never writes a round journal, and is not wired into ``review.run()``:
-that is the next sub-milestone. Importing it must not pull in ``codex`` - the
+decision and never writes a round journal; ``review.run()`` consumes it from 1c
+onward and does all of that. Importing it must not pull in ``codex`` - the
 working-tree hashing it needs lives in ``baseline``, which is why
 ``review.content_map`` is an alias there rather than a function here.
+
+Named ``round2`` for the round it was written for, but nothing in it is specific
+to round 2: ``build`` anchors on whatever the last recorded round is, so round 3
+targets round 2 exactly as round 2 targets round 1, up to ``gate.max_rounds``.
 
 The plan answers four questions, and every answer is attributable:
 
@@ -53,11 +57,18 @@ FALLBACK_FULL_ROUTER = "full_router"
 # Ordered by how strong a claim each makes on a slot; the cap reads this order.
 T_SCOPE_AUTHORITY = "scope_authority"   # non-negotiable while the delta is real
 T_CONTESTED = "contested"               # an open obligation from the last round
+T_PREVIOUS_FAILURE = "previous_failure"  # it was asked last round and could not answer
 T_FIX_VERIFICATION = "fix_verification"  # a fix was accepted, code has moved
 T_NEW_SURFACE = "new_surface"           # the delta itself calls for a reviewer
 
-TRIGGER_ORDER = (T_SCOPE_AUTHORITY, T_CONTESTED, T_FIX_VERIFICATION,
-                 T_NEW_SURFACE)
+# `previous_failure` outranks the two delta-driven triggers on purpose. A
+# reviewer whose Codex run timed out or hit the quota never gave a verdict on the
+# previous round at all, and the round was still recorded (`degraded`, H1). Its
+# silence must not read as an approve, so when a further round happens it is the
+# first to be re-asked - ahead of a reviewer that did answer and is merely being
+# shown new code.
+TRIGGER_ORDER = (T_SCOPE_AUTHORITY, T_CONTESTED, T_PREVIOUS_FAILURE,
+                 T_FIX_VERIFICATION, T_NEW_SURFACE)
 TRIGGER_RANK = {name: i for i, name in enumerate(TRIGGER_ORDER)}
 
 # ------------------------------------------------------- exclusion reasons ---
@@ -445,7 +456,8 @@ def plan(*, previous_record: Optional[Mapping[str, Any]],
          never: Iterable[str] = (),
          max_selected: int = 4,
          authority_personas: Optional[Set[str]] = None,
-         previous_authority: Optional[str] = None) -> Round2Plan:
+         previous_authority: Optional[str] = None,
+         failed_previously: Iterable[str] = ()) -> Round2Plan:
     """Build the plan from already-gathered facts. No I/O, no Codex, no clock.
 
     ``candidates`` must already be ordered by ``order_candidates`` - that is what
@@ -460,6 +472,7 @@ def plan(*, previous_record: Optional[Mapping[str, Any]],
     decision_status = decision_status or {}
     authority_personas = authority_personas or set()
     never = set(never)
+    failed_previously = set(failed_previously)
     result = Round2Plan(
         previous_round=(int(previous_record.get("round") or 0)
                         if previous_record else None),
@@ -485,6 +498,13 @@ def plan(*, previous_record: Optional[Mapping[str, Any]],
         states = held.get(name, set())
         if states & set(CONTESTING):
             triggers[name].append(T_CONTESTED)
+        if name in failed_previously:
+            # It was selected last round and did not answer. The round was still
+            # anchored on the scope authority's verdict, so nothing else marks
+            # this gap - and an angle that was never covered must not become an
+            # implicit approve. No delta condition: whether the code moved or not
+            # is irrelevant to a question that was never answered.
+            triggers[name].append(T_PREVIOUS_FAILURE)
         if has_delta and D_ACCEPTED in states:
             # Not restricted to the finding's own file: a correction is routinely
             # made somewhere else entirely, and the reviewer that asked for it is
@@ -733,7 +753,9 @@ def build(session_id: str, repo: Path, cfg,
         never=cfg.get("reviewers.never") or [],
         max_selected=int(cfg.get("reviewers.max_selected", 4)),
         authority_personas=authority_personas,
-        previous_authority=record.get("scope_authority"))
+        previous_authority=record.get("scope_authority"),
+        failed_previously=[name for name in (record.get("failed_reviewers") or [])
+                           if name in known])
 
 
 def _decision_status(session_id: str) -> Dict[str, str]:

@@ -108,6 +108,12 @@ def cmd_review(args) -> int:
         return EXIT_NO_CODEX
     if decisions.blocking(session):
         return EXIT_PENDING_HUMAN
+    # A ceiling is not a failure and not a verdict: nothing ran, nothing is
+    # blocking *from this run*, and the report has already said why. Obligations
+    # that predate it - unarbitrated findings, pending decisions - are enforced
+    # where they always were, by the Stop hook, and the two lines above still
+    # apply here. Inventing a new exit code for "capped" would break every
+    # caller that reads 0 as "the turn may end".
     return EXIT_BLOCKING if result.blocking_ids else EXIT_OK
 
 
@@ -423,6 +429,11 @@ def cmd_uninstall(args) -> int:
 def cmd_report(args) -> int:
     from . import paths, state
     session = _session(args, required=False)
+    if getattr(args, "summary", False):
+        from . import report
+        cwd = Path.cwd()
+        _out(report.render_session_summary(session, _config_or_exit(cwd)))
+        return EXIT_OK
     run_id = args.run or state.load(session).last_run_id
     if not run_id:
         _err("aucun run enregistré pour cette session.")
@@ -565,6 +576,10 @@ def build_parser() -> argparse.ArgumentParser:
     report_p.add_argument("--session")
     report_p.add_argument("--run")
     report_p.add_argument("--format", choices=["md", "json"], default="md")
+    report_p.add_argument(
+        "--summary", action="store_true",
+        help="bilan de session : rounds, reviewers exécutés et évités, "
+             "findings, décisions humaines")
     report_p.set_defaults(func=cmd_report)
 
     doctor_p = sub.add_parser("doctor", help="diagnostic complet")

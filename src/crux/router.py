@@ -167,6 +167,11 @@ class RouteResult:
     # reviewers this cap dropped, and they then look unjustified rather than
     # capped. Same rules, computed once, no second routing logic.
     eligible: List[str] = field(default_factory=list)
+    # Every reviewer the rules were allowed to consider, `never` already removed.
+    # A caller that must re-assert the scope authority after an override needs
+    # it: the authority may legitimately be a reviewer this run did not select,
+    # and picking it out of `selected` is what let `--only` remove the role.
+    candidates: List[str] = field(default_factory=list)
 
     def explain(self) -> str:
         lines = ["Signaux déclenchés : " + (", ".join(self.fired) or "aucun"), ""]
@@ -265,7 +270,8 @@ def select(ctx: RouteContext, cfg,
             row.note = "never"
 
     return RouteResult(selected=chosen, rows=rows, fired=fired,
-                       capped=capped, micro_change=micro, eligible=eligible)
+                       capped=capped, micro_change=micro, eligible=eligible,
+                       candidates=[r for r in candidates if r not in never])
 
 
 def build_context(diff, repo, project_has_tests: bool) -> RouteContext:

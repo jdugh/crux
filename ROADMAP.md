@@ -48,22 +48,38 @@ Status: DONE
 
 ### 1c — Round-2 execution
 
-Status: NEXT
+Status: DONE
 
-Brancher le planner dans le vrai workflow :
+Planner branché dans `review.run()` :
 
 round 1
 → findings
 → arbitrages/corrections Claude
 → delta
 → sélection ciblée
-→ round 2
+→ round N
 → consolidation
-→ décision finale.
+→ arrêt déterministe.
 
-Objectif principal :
+Acquis :
 
-ne jamais relancer inutilement tous les reviewers.
+* round 1 inchangé (routeur v0.1) ; round N > 1 piloté par `round2.build` ;
+* seuls les reviewers sélectionnés atteignent `codex.run_many` ;
+* repli `full_router` journalisé, sans jamais lever `max_rounds` ;
+* overrides `--only` / `--add` / `--all` passés par `apply_overrides`, autorité
+  de périmètre réintroduite en dernier — aucun override accessible à Claude ne
+  peut la retirer ;
+* `max_selected` appliqué une seule fois ;
+* `max_rounds` = nombre de rounds EXPLOITABLES, plafond absolu appliqué dans
+  `review.run()` et non plus seulement dans le hook Stop ;
+* arrêt `no_delta` : le plafond est un maximum, jamais une cible ;
+* réitération d'un finding rejeté = insistance visible, non bloquante, bornée ;
+* décision humaine déjà tranchée jamais rouverte sur identité sûre ;
+* `crux report --summary` : rounds, reviewers exécutés / évités, findings,
+  décisions humaines.
+
+Le module reste nommé `round2.py` ; son comportement s'applique à tout round
+N > 1.
 
 ---
 

@@ -305,6 +305,37 @@ def _next_id(session_id: str) -> str:
     return f"D{len(existing) + 1}"
 
 
+def by_finding_key(session_id: str) -> Dict[str, "Decision"]:
+    """``finding_key`` -> the single decision opened from it. Ambiguous dropped.
+
+    What it is for: a reviewer restating, at round 2, the very remark that
+    already became a human decision at round 1. Re-proposing it would ask the
+    human the same question twice, and a second pending decision for a question
+    already answered is worse than noise - it reads as a new obligation.
+
+    Two safety rules, both erring the same way:
+
+    * a key carried by more than one decision is *absent* from the index, so it
+      never matches. A false equivalence here would silently discard a genuine
+      new question; a duplicate merely repeats one. Duplication wins.
+    * ``withdrawn`` decisions are excluded. Claude retires a decision when it
+      becomes moot; a remark that comes back is not moot, and must be askable
+      again.
+
+    Keyless decisions - anything opened from a ``scope`` block rather than from a
+    finding - are not indexed: they have no finding identity to match on.
+    """
+    counts: Dict[str, int] = {}
+    found: Dict[str, "Decision"] = {}
+    for decision in load_all(session_id):
+        key = decision.finding_key or ""
+        if not key or decision.status == WITHDRAWN:
+            continue
+        counts[key] = counts.get(key, 0) + 1
+        found.setdefault(key, decision)
+    return {key: value for key, value in found.items() if counts.get(key) == 1}
+
+
 def propose(session_id: str, title: str, why: str,
             alternatives: Optional[List[str]] = None,
             approve_options: Optional[List[str]] = None,

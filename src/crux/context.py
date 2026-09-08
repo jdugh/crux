@@ -208,6 +208,20 @@ class PackInput:
     previous_findings: str = ""
     schema_inline: str = ""
     task_intent: str = ""
+    # --- targeted round (1c) -------------------------------------------------
+    round_no: int = 1
+    # Files whose bytes moved since the round this reviewer last saw, and the
+    # diff restricted to them. `delta_diff_text` is a diff of the *session
+    # baseline* against the current tree, narrowed to `delta_paths` - it is NOT
+    # a round(N-1) -> round(N) patch, and the section rendering it says so in
+    # those words. Calling it a patch between rounds would claim something the
+    # data does not support: lines changed before the previous round are in it
+    # too. What is guaranteed is narrower and true: these files have moved.
+    delta_paths: List[str] = field(default_factory=list)
+    delta_diff_text: str = ""
+    # Human decisions already settled that came out of *this* reviewer's own
+    # findings. Facts about the approved scope, never suggestions.
+    settled_decisions: List[str] = field(default_factory=list)
 
 
 def build_pack(spec: PackInput) -> str:
@@ -246,6 +260,19 @@ def build_pack(spec: PackInput) -> str:
         parts.append("# Décisions déjà tranchées par l'humain — dans le périmètre\n"
                      + "\n".join(f"- {d}" for d in spec.approved_decisions))
 
+    if spec.settled_decisions:
+        # Sent to every concerned reviewer, not only to the scope authority:
+        # a remark this reviewer raised became a question, the human answered
+        # it, and the answer is now part of the approved scope. A reviewer
+        # that cannot see it re-raises a settled decision as if it were open.
+        parts.append(
+            "# Tes remarques déjà tranchées par l'humain — ce sont des "
+            "décisions, pas des propositions\n"
+            "Ces points sont RÉGLÉS : l'humain a décidé. Ne les re-signale "
+            "pas, ne propose pas d'y revenir, n'en refais pas des findings."
+            "\n"
+            + "\n".join(f"- {d}" for d in spec.settled_decisions))
+
     if persona.wants("project_docs"):
         docs = project_docs(spec.repo)
         if docs:
@@ -273,12 +300,31 @@ def build_pack(spec: PackInput) -> str:
         parts.append("# Ton round précédent, et la réponse de Claude\n"
                      + spec.previous_findings)
 
+    if spec.delta_paths:
+        listing = "\n".join(f"- {path}" for path in spec.delta_paths)
+        parts.append(
+            f"# À VÉRIFIER EN PRIORITÉ — ce qui a bougé depuis le round "
+            f"{spec.round_no - 1}\n"
+            f"{len(spec.delta_paths)} fichier(s) ont changé depuis ce "
+            f"round :\n{listing}\n\n"
+            "Le diff ci-dessous est le diff de la BASELINE DE SESSION vers "
+            "L'ÉTAT COURANT, restreint à ces fichiers. Ce n'est PAS un "
+            f"patch round {spec.round_no - 1} → round {spec.round_no} : il "
+            "contient aussi des lignes déjà présentes au round précédent. Ce "
+            "qui est garanti, c'est que le contenu de ces fichiers a changé "
+            "depuis ce round-là.\n\n"
+            "```diff\n" + spec.delta_diff_text.rstrip() + "\n```")
+
     parts.append(
-        "# Diff de session\n"
-        "Ce diff ne contient QUE ce que Claude a modifié pendant cette session. "
-        "Les modifications antérieures de l'humain en sont exclues ; elles "
-        "peuvent apparaître comme lignes de contexte.\n\n"
-        "```diff\n" + spec.diff_text.rstrip() + "\n```")
+        ("# Diff de session (contexte secondaire)"
+         if spec.delta_paths else "# Diff de session") + "\n"
+        "Ce diff ne contient QUE ce que Claude a modifié pendant cette "
+        "session. Les modifications antérieures de l'humain en sont "
+        "exclues ; elles peuvent apparaître comme lignes de contexte."
+        + ("\nIl est là pour que tu raisonnes correctement, mais ta "
+           "priorité de vérification est le delta ci-dessus."
+           if spec.delta_paths else "")
+        + "\n\n```diff\n" + spec.diff_text.rstrip() + "\n```")
 
     parts.append(
         "Tu peux ouvrir n'importe quel fichier du dépôt en lecture seule pour "
